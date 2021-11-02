@@ -1,0 +1,214 @@
+/*
+Protocol: PUF based AKA
+Authors:  Liu Di(Beihang University)
+Date: 	  November 2021
+*/
+
+theory PUF_based_AKA
+begin
+
+builtins: hashing, xor
+
+functions: 
+    FE_Gen/1,           //(r,hd) = FE.Gen(R)
+    FE_Rec/2,           //r = FE.Rcv(R',hd)
+    PUF/1 [private]     //R = PUF(C), R' = PUF'(C')
+
+equations:
+    FE_Rec(Res, hd) =  FE_Gen(Res)
+
+
+/****** Protocol Models ******/
+
+rule Setup:
+[]
+--[Setup($StrongN, $WeakN)]->
+[!StrongN_WeakN($StrongN, $WeakN)]
+
+rule StrongNode_step1:
+    [Fr(~N1), Fr(~tid), !StrongN_WeakN(StrongN, WeakN)]
+    --[
+        StartStrongNodeSession(StrongN)
+    ]->
+    [State_1_StrongN(~tid, StrongN, WeakN, ~N1), Out(~N1)]
+
+rule WeakNode_step1:
+    let
+        C = h(<N1, ~N2>)
+        Res = PUF(C)
+        r = FE_Gen(Res)
+        msg = <~N2, ~hd>
+    in
+    [Fr(~N2), Fr(~hd), Fr(~tid), In(N1), !StrongN_WeakN(StrongN, WeakN)]
+    --[
+        StartWeakNodeSession(WeakN)
+    ]->
+    [State_1_WeakN(~tid, StrongN, WeakN, ~N2, N1, Res, r, ~hd), Out(msg)]
+
+rule StrongNode_step2:
+    let
+        C = h(<N1, N2>)
+        Res = PUF(C)
+        r = FE_Rec(Res, hd)
+        N4 = ~N3 XOR r
+        Auth1 = h(<r, N4>)            //Generate authentication material
+        msg_Out = <Auth1, N4>
+    in
+    [State_1_StrongN(~tid, StrongN, WeakN, N1), Fr(~N3), In(<N2, hd>)]
+    --[
+        Running(StrongN, WeakN, <'StrongNode', 'WeakNode', 'Auth1'>, h(<r, N4>)),
+        Running(StrongN, WeakN, <'StrongNode', 'WeakNode'>, h(<r, ~N3>))
+    ]->
+    [State_2_StrongN(~tid, StrongN, WeakN, N1, N2, hd, Res, r, ~N3, N4), Out(msg_Out)]
+ 
+rule WeakNode_step2:
+    let
+        //Auth1 = h(r)            //Strong Node verifies the identity of Weak Node
+        N3 = r XOR N4
+        Auth2 = h(N3)           //Generate authentication material
+        Key = h(<r, N3>)        //Calculate the session key
+    in
+    [State_1_WeakN(~tid, StrongN, WeakN, N2, N1, Res, r, hd), In(<Auth1, N4>)]
+    --[
+        Neq(r, N3),             //Check that N4 != 0
+        Eq(Auth1, h(<r, N4>)),
+        Commit(WeakN, StrongN, <'WeakNode', 'StrongNode', 'Auth1'>, Auth1),
+        Running(WeakN, StrongN, <'WeakNode', 'StrongNode'>, h(<r, N3>)),
+        Commit(WeakN, StrongN, <'WeakNode', 'StrongNode'>, Key),
+        Secret('WeakNode', WeakN, Key),
+        Honest(StrongN),
+        Honest(WeakN),
+        WeakNode_END()
+    ]->
+    [State_2_WeakN(~tid, StrongN, WeakN, N2, N1, Res, r, hd, N3, N4, Key), Out(Auth2)]
+
+rule StrongNode_step3:
+    let
+        //Auth2 = h(N3)    //Weak Node verifies the identity of Strong Node
+        Key = h(<r, N3>)        //Calculate the session key
+    in
+    [State_2_StrongN(~tid, StrongN, WeakN, N1, N2, hd, Res, r, N3, N4), In(Auth2)]
+    --[
+        Eq(Auth2, h(N3)),
+        Commit(StrongN, WeakN, <'StrongNode', 'WeakNode'>, Key),
+        Secret('StrongNode', StrongN, Key),
+        Honest(StrongN),
+        Honest(WeakN),
+        StrongNode_END()
+    ]->
+    [State_3_StrongN(~tid, StrongN, WeakN, N1, N2, hd, Res, r, N3, N4, Key)]
+
+
+/****** Model Reveal Entity ******/
+
+rule Reveal_WeakNode:
+    [State_2_WeakN(~tid, StrongN, WeakN, N2, N1, Res, r, hd, N3, N4, Key)]
+    --[Reveal('WeakNode', WeakN)]->
+    [Out(Res)]
+
+rule Reveal_StrongNode:
+    [State_2_StrongN(~tid, StrongN, WeakN, N1, N2, hd, Res, r, ~N3, N4)]
+    --[Reveal('StrongNode', StrongN)]->
+    [Out(Res)]
+
+
+/****** Restriction ******/
+
+restriction Equality:
+"
+    All x y #i. Eq(x,y) @i ==> x = y
+"
+
+restriction Inequality:
+"
+    All x y #i. Neq(x,y) @ #i ==> not(x = y)
+"
+
+restriction Setup_once:
+"
+    All StrongN1 WeakN1 StrongN2 WeakN2 #i #j. 
+        Setup(StrongN1, WeakN1) @i & Setup(StrongN2, WeakN2) @j
+        ==> #i = #j
+"
+
+restriction StrongNode_once:
+"
+    All StrongN #i #j. StartStrongNodeSession(StrongN) @i & StartStrongNodeSession(StrongN) @j
+        ==> #i = #j
+"
+
+restriction WeakNode_once:
+"
+    All WeakN #i #j. StartWeakNodeSession(WeakN) @i & StartWeakNodeSession(WeakN) @j
+        ==> #i = #j
+"
+
+
+/****** Security Properties ******/
+
+lemma trace_exists: exists-trace
+"
+    Ex #i #j. StrongNode_END() @i & WeakNode_END() @j
+        & (All WeakN1 WeakN2 #n #k. StartWeakNodeSession(WeakN1) @n
+            & StartWeakNodeSession(WeakN2) @k ==> #n = #k)
+        & (All StrongN1 StrongN2 #n #k. StartStrongNodeSession(StrongN1) @n 
+            & StartStrongNodeSession(StrongN2) @k ==> #n = #k)
+" 
+
+lemma StrongNode_Secrecy_Key:
+"
+    All StrongN Key #i. Secret('StrongNode', StrongN, Key) @i
+        ==> not (Ex #j. K(Key) @j)
+        | (Ex #r. Reveal('StrongNode', StrongN) @r & Honest(StrongN) @i)
+        | (Ex WeakN #r. Reveal('WeakNode', WeakN) @r & Honest(WeakN) @i)
+"
+
+lemma WeakNode_Secrecy_Key:
+"
+    All WeakN Key #i. Secret('WeakNode', WeakN, Key) @i
+        ==> not (Ex #j. K(Key) @j)
+        | (Ex #r. Reveal('WeakNode', WeakN) @r & Honest(WeakN) @i)
+        | (Ex StrongN #r. Reveal('StrongNode', StrongN) @r & Honest(StrongN) @i)
+
+"
+
+lemma StrongN_WeakN_noninjective_agreement_On_Key:
+"
+    All StrongN WeakN t #i. Commit(StrongN, WeakN, <'StrongNode', 'WeakNode'>, t) @i
+        ==> (Ex #j. Running(WeakN, StrongN, <'WeakNode', 'StrongNode'>, t) @j)
+        | (Ex #r. Reveal('WeakNode', WeakN) @r & Honest(WeakN) @i)
+        | (Ex #r. Reveal('StrongNode', StrongN) @r & Honest(StrongN) @i) 
+"
+
+lemma StrongN_WeakN_injective_agreement_On_Key:
+"
+    All StrongN WeakN t #i. Commit(StrongN, WeakN, <'StrongNode', 'WeakNode'>, t) @i
+        ==> (Ex #j. Running(WeakN, StrongN, <'WeakNode', 'StrongNode'>, t) @j 
+                & j < i
+                & not (Ex StrongN2 WeakN2 #i2. Commit(StrongN2, WeakN2, <'StrongNode', 'WeakNode'>, t) @i2
+                            & not(#i2 = #i)))
+            | (Ex #r. Reveal('WeakNode', WeakN) @r & Honest(WeakN) @i)
+            | (Ex #r. Reveal('StrongNode', StrongN) @r & Honest(StrongN) @i) 
+"
+
+lemma WeakN_StrongN_noninjective_agreement_On_Key:
+"
+    All StrongN WeakN t #i. Commit(WeakN, StrongN, <'WeakNode', 'StrongNode'>, t) @i
+        ==> (Ex #j. Running(StrongN, WeakN, <'StrongNode', 'WeakNode'>, t) @j)
+        | (Ex #r. Reveal('WeakNode', WeakN) @r & Honest(WeakN) @i)
+        | (Ex #r. Reveal('StrongNode', StrongN) @r & Honest(StrongN) @i) 
+"
+
+lemma WeakN_StrongN_injective_agreement_On_Key:
+"
+    All StrongN WeakN t #i. Commit(WeakN, StrongN, <'WeakNode', 'StrongNode'>, t) @i
+        ==> (Ex #j. Running(StrongN, WeakN, <'StrongNode', 'WeakNode'>, t) @j 
+                & j < i
+                & not (Ex StrongN2 WeakN2 #i2. Commit(WeakN2, StrongN2, <'WeakNode', 'StrongNode'>, t) @i2
+                            & not(#i2 = #i)))
+            | (Ex #r. Reveal('WeakNode', WeakN) @r & Honest(WeakN) @i)
+            | (Ex #r. Reveal('StrongNode', StrongN) @r & Honest(StrongN) @i) 
+"
+
+
+end
